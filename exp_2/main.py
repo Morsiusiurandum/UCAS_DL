@@ -1,43 +1,69 @@
+import sys
+
+sys.path.append("..")
+sys.path.append("../shared")
+
 import random
 
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
-
 from model import ViTCIFAR10
 from shared import load_config, get_dataloaders, save_checkpoint, load_checkpoint
-
-
+from torch.optim.lr_scheduler import CosineAnnealingLR
 # 训练函数
+from tqdm import tqdm
+
+
 def train(model, device, loader, optimizer, criterion):
     model.train()
     total_loss = 0
+    correct = 0
+    total = 0
+
     for imgs, labels in tqdm(loader, desc="Training"):
         imgs, labels = imgs.to(device), labels.to(device)
+
         optimizer.zero_grad()
         outputs = model(imgs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
+
         total_loss += loss.item()
-    return total_loss / len(loader)
+
+        # ======= 精度统计 =======
+        preds = outputs.argmax(dim=1)  # 取最大值对应的类
+        correct += (preds.eq(labels)).sum().item()
+        total += labels.size(0)
+
+    loss = total_loss / len(loader)
+    acc = correct / total * 100  # 转换为百分比
+    return loss, acc
 
 
 # 测试函数
-def evaluate(model, device, loader):
+def evaluate(model, device, loader, criterion):
     model.eval()
+    total_loss = 0
     correct = 0
     total = 0
+
     with torch.no_grad():
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
             outputs = model(imgs)
-            _, predicted = torch.max(outputs, 1)
-            correct += (predicted.eq(labels)).sum().item()
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+
+            preds = outputs.argmax(dim=1)
+            correct += (preds.eq(labels)).sum().item()
             total += labels.size(0)
-    return correct / total
+
+    avg_loss = total_loss / len(loader)
+    acc = correct / total * 100
+    return avg_loss, acc
 
 
 def show_sample_predictions(model, device, test_loader, class_names=None, num_images=5):
@@ -77,16 +103,22 @@ def main():
     model = ViTCIFAR10().to(device)
     train_loader, test_loader = get_dataloaders(config["dataset"], config["batch_size"])
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
-
+    optimizer = optim.AdamW(model.parameters(), lr=float(config["learning_rate"]))
+    scheduler = CosineAnnealingLR(optimizer, T_max=config["epochs"])
     start_epoch = load_checkpoint(model, optimizer, path="checkpoint/vit_cifar10_final.pth")
+    epochs = config["epochs"] + 1
     # 训练和评估模型
-    for epoch in range(start_epoch, config["epochs"] + 1):
-        loss = train(model, device, train_loader, optimizer, criterion)
-        acc = evaluate(model, device, test_loader)
-        print(f"Epoch {epoch + 1}: Loss={loss:.4f}, Test Acc={acc:.4f}")
-        save_checkpoint(model, optimizer, epoch, path=f"checkpoint/vit_cifar10_{epoch}.pth")
-        save_checkpoint(model, optimizer, epoch, path="checkpoint/vit_cifar10_final.pth")
+    for epoch in range(start_epoch, epochs):
+        # 训练
+        train_loss, train_acc = train(model, device, train_loader, optimizer, criterion)
+        test_loss, test_acc = evaluate(model, device, test_loader, criterion)
+        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Test Loss: {test_loss:.4f}, Acc: {test_acc:.2f}%")
+        if epoch % 10 == 0:
+            save_checkpoint(model, optimizer, epoch, path=f"checkpoint/vit_cifar10_{epoch}.pth")
+            save_checkpoint(model, optimizer, epoch, path="checkpoint/vit_cifar10_final.pth")
+        scheduler.step()
+    save_checkpoint(model, optimizer, epochs, path="checkpoint/vit_cifar10_final.pth")
+    show_sample_predictions(model, device, test_loader, num_images=5)
 
 
 # 主流程

@@ -20,13 +20,26 @@ def get_dataloaders(datasets_name, batch_size=64):
         train_set = datasets.MNIST(root='./dataset', train=True, download=True, transform=transform)
         test_set = datasets.MNIST(root='./dataset', train=False, download=True, transform=transform)
     elif datasets_name == 'CIFAR10':
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),  # ViT 要求更大尺寸
+        # 训练集增强
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),  # 先填充4像素再随机裁剪
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),  # 增强色彩抖动的强度
             transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,))
+            transforms.Normalize((0.4914, 0.4822, 0.4465), 
+                                 (0.2023, 0.1994, 0.2010)),  # CIFAR-10 官方均值方差
         ])
-        train_set = datasets.CIFAR10(root='./dataset', train=True, download=True, transform=transform)
-        test_set = datasets.CIFAR10(root='./dataset', train=False, download=True, transform=transform)
+        # 测试集只做标准化
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), 
+                                 (0.2023, 0.1994, 0.2010)),
+        ])
+
+        train_set = datasets.CIFAR10(root='./dataset', train=True, download=True, transform=train_transform)
+        test_set = datasets.CIFAR10(root='./dataset', train=False, download=True, transform=test_transform)
+
     else:
         raise ValueError("Unsupported dataset name. Use 'MNIST' or 'CIFAR10'.")
 
