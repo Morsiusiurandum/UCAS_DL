@@ -46,5 +46,7 @@ class BasicManager:
             test_loss, test_acc = self.evaluate()
             print(
                 f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f}, Acc: {train_acc:.2f}% | Test Loss: {test_loss:.4f}, Acc: {test_acc:.2f}%")
-            save_checkpoint(self.model, self.optimizer, epoch, path=save_path)
+            if(epoch + 1) % self.config["save_interval"] == 0:
+                print(f"Saving checkpoint for epoch {epoch + 1}...")
+                save_checkpoint(self.model, self.optimizer, epoch, path=save_path)
             self.scheduler.step()

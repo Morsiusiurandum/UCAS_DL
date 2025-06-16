@@ -1,5 +1,5 @@
 batch_size: 64
 learning_rate: 0.001
-epochs: 1
-
+epochs: 10
+save_interval: 2
 dataset: MNIST
