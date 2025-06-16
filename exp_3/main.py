@@ -19,7 +19,7 @@ def set_seed(seed=42):
 
 
 def train(model, dataloader, criterion, optimizer, device):
-    model.trainer()
+    model.train()
     total_loss = 0
     for batch in dataloader:
         x, y = batch
@@ -60,11 +60,11 @@ def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=4
             generated.append(next_char)
             input_seq = torch.cat([input_seq, torch.tensor([[next_id]], device=device)], dim=1)
 
-    print("🌸 自动生成诗句：", "".join(generated))
+    print("自动生成诗句：", "".join(generated))
 
 
 def main():
-    # 🧱 超参数
+    # 超参数
     embed_size = 256
     num_channels = 512
     num_layers = 4
@@ -77,6 +77,12 @@ def main():
     set_seed(42)
 
     train_loader, val_loader, idx2char, char2idx = get_dataloaders('TangPoetry')
+
+    # 向idx2char和char2idx添加<unk>标记
+    length = len(char2idx)
+    idx2char[length] = '<unk>'
+    char2idx['<unk>'] = len(char2idx)
+
     # 🧠 模型构建
     model = TCNPoetryModel(vocab_size=len(char2idx),
                            embed_size=embed_size,
@@ -85,11 +91,11 @@ def main():
                            kernel_size=kernel_size,
                            dropout=dropout).to(device)
 
-    # 🎯 损失函数 + 优化器
+    # 损失函数 + 优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # 📈 训练主循环
+    # 训练主循环
     for epoch in range(1, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, device)
         val_loss = evaluate(model, val_loader, criterion, device)
@@ -99,7 +105,7 @@ def main():
 
     # 💾 模型保存
     torch.save(model.state_dict(), "tcn_poetry.pth")
-    print("✅ 模型已保存为 tcn_poetry.pth")
+    print("模型已保存为 tcn_poetry.pth")
 
 
 if __name__ == "__main__":
