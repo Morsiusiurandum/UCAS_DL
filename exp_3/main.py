@@ -19,7 +19,7 @@ def set_seed(seed=42):
 
 
 def train(model, dataloader, criterion, optimizer, device):
-    model.train()
+    model.trainer()
     total_loss = 0
     for batch in dataloader:
         x, y = batch

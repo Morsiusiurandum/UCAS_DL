@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 
 def train(model, device, loader, optimizer, criterion):
-    model.train()
+    model.trainer()
     total_loss = 0
     correct = 0
     total = 0
