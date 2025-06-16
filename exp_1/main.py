@@ -12,22 +12,41 @@ from shared import BasicManager
 class Manager(BasicManager):
     def trainer(self):
         self.model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
         for data, target in self.train_loader:
             data, target = data.to(self.device), target.to(self.device)
             self.optimizer.zero_grad()
-            loss = self.criterion(self.model(data), target)
+            output = self.model(data)
+            loss = self.criterion(output, target)
             loss.backward()
             self.optimizer.step()
+            total_loss += loss.item()
+            preds = output.argmax(dim=1)
+            correct += preds.eq(target).sum().item()
+            total += target.size(0)
+        avg_loss = total_loss / len(self.train_loader)
+        acc = correct / total * 100
+        return avg_loss, acc
 
     def evaluate(self):
         self.model.eval()
+        total_loss = 0
         correct = 0
+        total = 0
         with torch.no_grad():
             for data, target in self.test_loader:
                 data, target = data.to(self.device), target.to(self.device)
-                pred = self.model(data).argmax(dim=1)
-                correct += pred.eq(target).sum().item()
-        print(f'Accuracy: {correct / len(self.test_loader.dataset):.4f}')
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                total_loss += loss.item()
+                preds = output.argmax(dim=1)
+                correct += preds.eq(target).sum().item()
+                total += target.size(0)
+        avg_loss = total_loss / len(self.test_loader)
+        acc = correct / total * 100
+        return avg_loss, acc
 
     def predictions(self):
 
