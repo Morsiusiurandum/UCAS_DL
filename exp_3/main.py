@@ -48,7 +48,7 @@ def evaluate(model, dataloader, criterion, device):
 
 def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=40, device='cpu'):
     model.eval()
-    generated = list(start_text)
+    generated = ['<START>'] + list(start_text)
     input_seq = torch.tensor([[char2idx.get(c, char2idx['<unk>']) for c in generated]], dtype=torch.long).to(device)
 
     with torch.no_grad():
@@ -94,14 +94,13 @@ def main():
     # 损失函数 + 优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
+    show_sample_predictions(model, start_text="湖光秋月两相和", idx2char=idx2char, char2idx=char2idx, device=device)
     # 训练主循环
     for epoch in range(1, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, device)
         val_loss = evaluate(model, val_loader, criterion, device)
         print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        if epoch % 2 == 0:
-            show_sample_predictions(model, start_text="湖光秋月两相和", idx2char=idx2char, char2idx=char2idx, device=device)
+
 
     # 💾 模型保存
     torch.save(model.state_dict(), "tcn_poetry.pth")
