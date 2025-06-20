@@ -46,18 +46,22 @@ def evaluate(model, dataloader, criterion, device):
     return total_loss / len(dataloader)
 
 
-def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=40, device='cpu'):
+def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=60, device='cpu'):
     model.eval()
     generated = ['<START>'] + list(start_text)
-    input_seq = torch.tensor([[char2idx.get(c, char2idx['<unk>']) for c in generated]], dtype=torch.long).to(device)
+    char_ids = [char2idx.get(c, char2idx['<unk>']) for c in generated]
+    char_ids_2d = [char_ids]
+    input_seq = torch.tensor(char_ids_2d, dtype=torch.long).to(device)
 
     with torch.no_grad():
         for _ in range(max_gen_len):
             output = model(input_seq)
-            last_logits = output[0, -1]  # [vocab_size]
+            last_logits = output[0, -1]
             next_id = torch.multinomial(torch.softmax(last_logits, dim=-1), 1).item()
             next_char = idx2char.get(next_id, '<unk>')
             generated.append(next_char)
+            if next_char == '<EOP>':
+                break
             input_seq = torch.cat([input_seq, torch.tensor([[next_id]], device=device)], dim=1)
 
     print("自动生成诗句：", "".join(generated))
@@ -67,12 +71,11 @@ def main():
     # 超参数
     embed_size = 256
     num_channels = 512
-    num_layers = 4
+    num_layers = 6
     kernel_size = 3
     dropout = 0.2
-    lr = 0.003
-    batch_size = 64
-    epochs = 10
+    lr = 0.0005
+    epochs = 500
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(42)
 
@@ -92,15 +95,16 @@ def main():
                            dropout=dropout).to(device)
 
     # 损失函数 + 优化器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    show_sample_predictions(model, start_text="湖光秋月两相和", idx2char=idx2char, char2idx=char2idx, device=device)
+    criterion = nn.CrossEntropyLoss(ignore_index=char2idx['</s>'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
     # 训练主循环
     for epoch in range(1, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, device)
         val_loss = evaluate(model, val_loader, criterion, device)
         print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-
+        if epoch % 5 == 0:
+            show_sample_predictions(model, start_text="湖光秋月两相和", idx2char=idx2char, char2idx=char2idx, device=device)
 
     # 💾 模型保存
     torch.save(model.state_dict(), "tcn_poetry.pth")
