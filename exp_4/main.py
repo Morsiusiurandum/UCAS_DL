@@ -5,7 +5,7 @@ import torch.optim as optim
 from model import BERT2BERTTranslationModel
 
 
-def train_one_epoch(model, data_loader, optimizer, loss_function, device):
+def trainer(model, data_loader, optimizer, loss_function, device):
     model.train()
     total_loss = 0
 
@@ -29,7 +29,7 @@ def train_one_epoch(model, data_loader, optimizer, loss_function, device):
     return total_loss / len(data_loader)
 
 
-def evaluate_model(model, data_loader, loss_function, device):
+def evaluate(model, data_loader, loss_function, device):
     model.eval()
     total_loss = 0
 
@@ -50,16 +50,60 @@ def evaluate_model(model, data_loader, loss_function, device):
     return total_loss / len(data_loader)
 
 
+def sample(model, src_word2idx, tgt_idx2word, device):
+    ###
+
+    ###
+    # 推理
+    model.eval()
+    # 准备测试输入
+    test_sentence = "七 天 时间 里 , 他们 为 赶 时间 , 白天 啃 干馕喝 白开水 , 晚上 居住 在 牧民 的 毡房 里 ."
+    test_tokens = test_sentence.split()
+
+    if len(test_tokens) == 1:  # 可能是中文未分词，按字分
+        test_tokens = list(test_sentence)
+
+    # 将测试句子转换为索引
+    test_index = [src_word2idx.get(word, src_word2idx.get('<UNK>', 0)) for word in test_tokens]
+    input_tensor = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
+
+    with ((torch.no_grad())):
+        # 简单贪心解码
+        max_len = 30
+        tgt_input = torch.tensor([5], dtype=torch.long).unsqueeze(0).to(device)
+        for _ in range(max_len):
+
+            input_token_ids = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
+            segment_token_type_ids = torch.zeros(len(input_tensor), dtype=torch.long).to(device)
+
+            #  得到模型输出
+            output_logits = model(input_token_ids, segment_token_type_ids, None, tgt_input, None)
+            next_token_logits = output_logits[0, -1]
+            next_token_id = next_token_logits.argmax().item()
+            tgt_input = torch.cat([tgt_input, torch.tensor([[next_token_id]], device=device)], dim=1)
+
+            # 如果遇到 <EOS>，则停止生成
+            if next_token_id == 6:
+                break
+        output_ids = tgt_input[0].tolist()
+
+        # 将输出索引转换为单词
+        output_words = [tgt_idx2word.get(idx, '<UNK>') for idx in output_ids]
+        print(f"Test sentence: {test_sentence}")
+        print(f"Tokenized: {test_tokens}")
+        print(f"Token IDs: {test_index}")
+        print(f"Model output IDs: {output_ids}")
+        print(f"Model output words: {' '.join(output_words)}")
+
+
 def main():
     # 模型超参数
-    source_vocabulary_size = 300000
-    target_vocabulary_size = 300000
     model_dimension = 512
     maximum_sequence_length = 512
     number_of_layers = 6
     number_of_attention_heads = 8
     hidden_dimension = 2048
-    dropout_rate = 0.1
+    dropout_rate = 0.2
     pad_token_id = 0  # 需要根据你的词表设置
 
     # 设备
@@ -90,54 +134,22 @@ def main():
     loss_function = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     # 优化器
-    optimizer = optim.Adam(model.parameters(), lr=5e-5)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
     # 训练过程
-    total_epochs = 10
+    total_epochs = 100
     for epoch in range(total_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, loss_function, device)
+        train_loss = trainer(model, train_loader, optimizer, loss_function, device)
         # val_loss = evaluate_model(model, val_loader, loss_function, device)
         # print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f}")
+        if (epoch + 1) % 10 == 0:
+            # 每10个epoch保存一次模型
+            torch.save(model.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
+            print(f"Saving model at epoch {epoch + 1}...")
+            sample(model, src_word2idx, tgt_idx2word, device)
 
-        torch.save(model.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
-
-    # 推理
-    model.eval()
-    # 准备测试输入
-    test_sentence = "你好，世界！"
-    # 按词分割，如果是按字分词请改为list(test_sentence)
-    test_tokens = test_sentence.split()
-    if len(test_tokens) == 1:  # 可能是中文未分词，按字分
-        test_tokens = list(test_sentence)
-
-    # 将测试句子转换为索引
-    test_index = [src_word2idx.get(word, src_word2idx.get('<unk>', 0)) for word in test_tokens]
-
-    input_tensor = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
-
-    # 假设模型有generate或类似方法，否则用简单的贪心解码
-    with torch.no_grad():
-        # 这里只做简单贪心解码，具体方法需根据你的模型实现调整
-        max_len = 30
-        tgt_input = torch.tensor([tgt_word2idx.get('<bos>', 1)], dtype=torch.long).unsqueeze(0).to(device)
-        for _ in range(max_len):
-            # 这里假设模型forward支持如下参数，具体请根据你的模型API调整
-            output_logits = model(input_tensor, None, None, tgt_input, None)
-            next_token_logits = output_logits[0, -1]
-            next_token_id = next_token_logits.argmax().item()
-            tgt_input = torch.cat([tgt_input, torch.tensor([[next_token_id]], device=device)], dim=1)
-            if next_token_id == tgt_word2idx.get('<eos>', 2):
-                break
-        output_ids = tgt_input[0].tolist()
-        # 去掉<BOS>和<EOS>
-
-        output_words = [tgt_idx2word.get(idx, '<unk>') for idx in output_ids]
-        print(f"Test sentence: {test_sentence}")
-        print(f"Tokenized: {test_tokens}")
-        print(f"Token IDs: {test_index}")
-        print(f"Model output IDs: {output_ids}")
-        print(f"Model output words: {' '.join(output_words)}")
+    # model.load_state_dict(torch.load("bert2bert_epoch10.pth"))
 
 
 if __name__ == "__main__":
