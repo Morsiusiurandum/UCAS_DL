@@ -1,6 +1,15 @@
-import torch
+import os
+
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '12355'
+
+os.environ["USE_LIBUV"] = "0"
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch
 
 from model import BERT2BERTTranslationModel
 
@@ -71,6 +80,7 @@ def sample(model, src_word2idx, tgt_idx2word, device):
         # 简单贪心解码
         max_len = 30
         tgt_input = torch.tensor([5], dtype=torch.long).unsqueeze(0).to(device)
+
         for _ in range(max_len):
 
             input_token_ids = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
@@ -96,7 +106,17 @@ def sample(model, src_word2idx, tgt_idx2word, device):
         print(f"Model output words: {' '.join(output_words)}")
 
 
-def main():
+def setup(rank, world_size):
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def main(rank, world_size):
+    setup(rank, world_size)
     # 模型超参数
     model_dimension = 512
     maximum_sequence_length = 512
@@ -115,13 +135,16 @@ def main():
             src_path="dataset/TM-training-set/chinese.txt",
             tgt_path="dataset/TM-training-set/english.txt",
             src_vocab_path="dataset/vocab.zh",
-            tgt_vocab_path="dataset/vocab.en"
+            tgt_vocab_path="dataset/vocab.en",
+            distributed=True,
+            rank=rank,
+            world_size=world_size
     )
 
     # 模型
     model = BERT2BERTTranslationModel(
-            src_word2idx.__len__(),
-            tgt_word2idx.__len__(),
+            len(src_word2idx),
+            len(tgt_word2idx),
             model_dimension,
             maximum_sequence_length,
             number_of_layers,
@@ -130,30 +153,34 @@ def main():
             dropout_rate
     ).to(device)
 
-    # 损失函数（忽略 pad 位置）
+    model = DDP(model, device_ids=[rank])
     loss_function = nn.CrossEntropyLoss(ignore_index=pad_token_id)
-
-    # 优化器
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
-    # 训练过程
     total_epochs = 100
     for epoch in range(total_epochs):
+        train_loader.sampler.set_epoch(epoch)
         train_loss = trainer(model, train_loader, optimizer, loss_function, device)
-        # val_loss = evaluate_model(model, val_loader, loss_function, device)
-        # print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f}")
-        if (epoch + 1) % 10 == 0:
-            # 每10个epoch保存一次模型
-            torch.save(model.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
-            print(f"Saving model at epoch {epoch + 1}...")
-            sample(model, src_word2idx, tgt_idx2word, device)
 
+        if rank == 0:  # 只在主进程保存
+            print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f}")
+            if (epoch + 1) % 5 == 0:
+                torch.save(model.module.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
+                print(f"Saving model at epoch {epoch + 1}...")
+                sample(model.module, src_word2idx, tgt_idx2word, device)
+
+    cleanup()
     # model.load_state_dict(torch.load("bert2bert_epoch10.pth"))
 
 
 if __name__ == "__main__":
-    main()
+    print(torch.__version__)
+    print(torch.version.cuda)
+    print(torch.backends.cudnn.version())
+    print(torch.distributed.is_nccl_available())
+
+    world_size = torch.cuda.device_count()
+    mp.spawn(main, args=(world_size,), nprocs=world_size)
 
     # from data_loader import get_dataloader
     #
