@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
-import random
 from model import BERT2BERTTranslationModel
 
 
@@ -37,19 +36,19 @@ def trainer(model, data_loader, optimizer, loss_function, teacher_forcing_ratio,
         optimizer.zero_grad()
 
         # 使用 Teacher Forcing
-        use_teacher = random.random() < teacher_forcing_ratio
-
-        if use_teacher:
-            # 直接使用 ground-truth 作为 decoder 输入
-            decoder_input_ids = target_ids
-        else:
-            # 用 greedy decoding 模拟 decoder 自生成行为
-            decoder_input_ids = torch.full((batch_size, 1), fill_value=5, dtype=torch.long).to(device)  # 5 = <BOS>
-            for _ in range(tgt_len - 1):
-                segment_type = torch.zeros_like(input_ids).to(device)  # 假设全是句子 A
-                decoder_outputs = model(input_ids, segment_ids, input_mask, decoder_input_ids, None)
-                next_token = decoder_outputs[:, -1, :].argmax(dim=-1, keepdim=True)
-                decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
+        # use_teacher = random.random() < teacher_forcing_ratio
+        # 
+        # if use_teacher:
+        #     # 直接使用 ground-truth 作为 decoder 输入
+        #     decoder_input_ids = target_ids
+        # else:
+        #     # 用 greedy decoding 模拟 decoder 自生成行为
+        #     decoder_input_ids = torch.full((batch_size, 1), fill_value=5, dtype=torch.long).to(device)  # 5 = <BOS>
+        #     for _ in range(tgt_len - 1):
+        #         segment_type = torch.zeros_like(input_ids).to(device)  # 假设全是句子 A
+        #         decoder_outputs = model(input_ids, segment_ids, input_mask, decoder_input_ids, None)
+        #         next_token = decoder_outputs[:, -1, :].argmax(dim=-1, keepdim=True)
+        #         decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
 
         # 构造 causal mask：防止 decoder 看到未来
         causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=device)).bool()  # [tgt_len, tgt_len]
@@ -57,8 +56,8 @@ def trainer(model, data_loader, optimizer, loss_function, teacher_forcing_ratio,
         padding_mask = target_mask.unsqueeze(1).expand(-1, tgt_len, -1)
         decoder_attention_mask = (causal_mask & padding_mask).int()  # 1表示可见位置
 
-        segment_type = torch.zeros_like(input_ids).to(device)
-        output_logits = model(input_ids, segment_type, input_mask, decoder_input_ids, decoder_attention_mask)
+        # segment_type = torch.zeros_like(input_ids).to(device)
+        output_logits = model(input_ids, segment_ids, input_mask, target_ids, decoder_attention_mask)
 
         # output_logits = model(input_ids, segment_ids, input_mask, target_ids, target_mask)
 
@@ -92,7 +91,7 @@ def evaluate(model, data_loader, loss_function, device):
     return total_loss / len(data_loader)
 
 
-def sample(model, src_word2idx, tgt_idx2word, device):
+def sample(model, src_word2idx, tgt_idx2word, device) -> str:
     ###
 
     ###
@@ -132,11 +131,12 @@ def sample(model, src_word2idx, tgt_idx2word, device):
 
         # 将输出索引转换为单词
         output_words = [tgt_idx2word.get(idx, '<UNK>') for idx in output_ids]
-        print(f"Test sentence: {test_sentence}")
-        print(f"Tokenized: {test_tokens}")
-        print(f"Token IDs: {test_index}")
-        print(f"Model output IDs: {output_ids}")
-        print(f"Model output words: {' '.join(output_words)}")
+        return ' '.join(output_words)
+        # print(f"Test sentence: {test_sentence}")
+        # print(f"Tokenized: {test_tokens}")
+        # print(f"Token IDs: {test_index}")
+        # print(f"Model output IDs: {output_ids}")
+        # print(f"Model output words: {' '.join(output_words)}")
 
 
 def setup(rank, world_size):
@@ -163,10 +163,10 @@ def main():
     dropout_rate = 0.2
     pad_token_id = 0  # 需要根据你的词表设置
     teacher_forcing_ratio = 0.8
-    # 设备
-    local_rank = int(os.environ["LOCAL_RANK"])
+
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
+    print(f"Device set to {device}, rank {rank}, world size {world_size}")
 
     from data_loader import get_dataloader
 
@@ -179,7 +179,7 @@ def main():
             rank=rank,
             world_size=world_size
     )
-
+    print("Data loader created.")
     # 模型
     model = BERT2BERTTranslationModel(
             len(src_word2idx),
@@ -196,17 +196,18 @@ def main():
     loss_function = nn.CrossEntropyLoss(ignore_index=pad_token_id)
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
-    total_epochs = 100
+    total_epochs = 3
+    print(f"Starting training for {total_epochs} epochs...")
     for epoch in range(total_epochs):
         train_loader.sampler.set_epoch(epoch)
         train_loss = trainer(model, train_loader, optimizer, loss_function, teacher_forcing_ratio, device)
 
         if rank == 0:  # 只在主进程保存
-            print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f}")
-            if (epoch + 1) % 5 == 0:
+            example = sample(model.module, src_word2idx, tgt_idx2word, device)
+            print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Example: {example}")
+            if (epoch + 1) % 10 == 0:
                 torch.save(model.module.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
                 print(f"Saving model at epoch {epoch + 1}...")
-                sample(model.module, src_word2idx, tgt_idx2word, device)
 
     cleanup()
     # model.load_state_dict(torch.load("bert2bert_epoch10.pth"))
