@@ -1,9 +1,7 @@
 import os
-
-os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12355'
-
-os.environ["USE_LIBUV"] = "0"
+os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
+os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
@@ -107,7 +105,7 @@ def sample(model, src_word2idx, tgt_idx2word, device):
 
 
 def setup(rank, world_size):
-    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 
@@ -115,7 +113,11 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def main(rank, world_size):
+def main():
+    # 获取 torchrun 设置的 rank/世界大小信息
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
     setup(rank, world_size)
     # 模型超参数
     model_dimension = 512
@@ -127,7 +129,9 @@ def main(rank, world_size):
     pad_token_id = 0  # 需要根据你的词表设置
 
     # 设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
 
     from data_loader import get_dataloader
 
@@ -174,13 +178,12 @@ def main(rank, world_size):
 
 
 if __name__ == "__main__":
-    print(torch.__version__)
-    print(torch.version.cuda)
-    print(torch.backends.cudnn.version())
-    print(torch.distributed.is_nccl_available())
+    # print(torch.__version__)
+    # print(torch.version.cuda)
+    # print(torch.backends.cudnn.version())
+    # print(torch.distributed.is_nccl_available())
 
-    world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(world_size,), nprocs=world_size)
+    main()
 
     # from data_loader import get_dataloader
     #
