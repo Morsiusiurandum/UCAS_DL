@@ -1,18 +1,25 @@
 import os
+
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+
+# os.environ['MASTER_ADDR'] = '127.0.0.1'
+# os.environ['MASTER_PORT'] = '29500'
+# os.environ["LOCAL_RANK"] = "0"
+# os.environ["RANK"] = "0"
+# os.environ["WORLD_SIZE"] = "1"
+
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
-
+import random
 from model import BERT2BERTTranslationModel
 
 
-def trainer(model, data_loader, optimizer, loss_function, device):
+def trainer(model, data_loader, optimizer, loss_function, teacher_forcing_ratio, device):
     model.train()
     total_loss = 0
 
@@ -23,10 +30,38 @@ def trainer(model, data_loader, optimizer, loss_function, device):
 
         target_ids = batch['decoder_input_ids'].to(device)
         target_mask = batch['decoder_attention_mask'].to(device)
+
         target_labels = batch['decoder_labels'].to(device)
 
+        batch_size, tgt_len = target_ids.size()
         optimizer.zero_grad()
-        output_logits = model(input_ids, segment_ids, input_mask, target_ids, target_mask)
+
+        # 使用 Teacher Forcing
+        use_teacher = random.random() < teacher_forcing_ratio
+
+        if use_teacher:
+            # 直接使用 ground-truth 作为 decoder 输入
+            decoder_input_ids = target_ids
+        else:
+            # 用 greedy decoding 模拟 decoder 自生成行为
+            decoder_input_ids = torch.full((batch_size, 1), fill_value=5, dtype=torch.long).to(device)  # 5 = <BOS>
+            for _ in range(tgt_len - 1):
+                segment_type = torch.zeros_like(input_ids).to(device)  # 假设全是句子 A
+                decoder_outputs = model(input_ids, segment_ids, input_mask, decoder_input_ids, None)
+                next_token = decoder_outputs[:, -1, :].argmax(dim=-1, keepdim=True)
+                decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
+
+        # 构造 causal mask：防止 decoder 看到未来
+        causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=device)).bool()  # [tgt_len, tgt_len]
+        causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        padding_mask = target_mask.unsqueeze(1).expand(-1, tgt_len, -1)
+        decoder_attention_mask = (causal_mask & padding_mask).int()  # 1表示可见位置
+
+        segment_type = torch.zeros_like(input_ids).to(device)
+        output_logits = model(input_ids, segment_type, input_mask, decoder_input_ids, decoder_attention_mask)
+
+        # output_logits = model(input_ids, segment_ids, input_mask, target_ids, target_mask)
+
         loss = loss_function(output_logits.view(-1, output_logits.size(-1)), target_labels.view(-1))
         loss.backward()
         optimizer.step()
@@ -127,7 +162,7 @@ def main():
     hidden_dimension = 2048
     dropout_rate = 0.2
     pad_token_id = 0  # 需要根据你的词表设置
-
+    teacher_forcing_ratio = 0.8
     # 设备
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
@@ -164,7 +199,7 @@ def main():
     total_epochs = 100
     for epoch in range(total_epochs):
         train_loader.sampler.set_epoch(epoch)
-        train_loss = trainer(model, train_loader, optimizer, loss_function, device)
+        train_loss = trainer(model, train_loader, optimizer, loss_function, teacher_forcing_ratio, device)
 
         if rank == 0:  # 只在主进程保存
             print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f}")
