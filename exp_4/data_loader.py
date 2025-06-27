@@ -39,11 +39,14 @@ class TextDataset(Dataset):
 
     def __getitem__(self, idx):
         # 源语言
-        src_tokens = [self.src_word2idx.get(w, self.src_word2idx.get(self.unk_token, 0)) for w in self.src_lines[idx].split()]
+        src_tokens = [self.src_word2idx.get(w, self.src_word2idx.get(self.unk_token)) for w in self.src_lines[idx].split()]
         # 目标语言加BOS/EOS
-        tgt_tokens = [self.tgt_word2idx.get(self.bos_token, 1)] + \
-                     [self.tgt_word2idx.get(w, self.tgt_word2idx.get(self.unk_token, 0)) for w in self.tgt_lines[idx].split()] + \
-                     [self.tgt_word2idx.get(self.eos_token, 2)]
+        tgt_tokens = [self.tgt_word2idx.get(self.bos_token)] + \
+                     [self.tgt_word2idx.get(w, self.tgt_word2idx.get(self.unk_token)) for w in self.tgt_lines[idx].split()] + \
+                     [self.tgt_word2idx.get(self.eos_token)]
+        
+        # 处理目标语言的长度
+        
         # decoder_input_ids（去掉最后一个token），decoder_labels（去掉第一个token）
         decoder_input_ids = tgt_tokens[:-1]
         decoder_labels = tgt_tokens[1:]

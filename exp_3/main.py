@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from model import TCNPoetryModel
-from shared import get_dataloaders
+from shared import get_dataloaders, show_log, save_checkpoint, load_checkpoint
 
 
 def set_seed(seed=42):
@@ -46,7 +46,7 @@ def evaluate(model, dataloader, criterion, device):
     return total_loss / len(dataloader)
 
 
-def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=60, device='cpu'):
+def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=150, device=torch.device("cpu")):
     model.eval()
     generated = ['<START>'] + list(start_text)
     char_ids = [char2idx.get(c, char2idx['<unk>']) for c in generated]
@@ -64,7 +64,7 @@ def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=6
                 break
             input_seq = torch.cat([input_seq, torch.tensor([[next_id]], device=device)], dim=1)
 
-    print("自动生成诗句：", "".join(generated))
+    return "".join(generated)
 
 
 def main():
@@ -98,17 +98,20 @@ def main():
     criterion = nn.CrossEntropyLoss(ignore_index=char2idx['</s>'])
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
+    # 模型加载
+
+    load_checkpoint(model, optimizer, path="checkpoint/tcn_poetry.pth")
+    example = show_sample_predictions(model, "哈基米", idx2char, char2idx, max_gen_len=150, device=device)
+    print(example)
+    return
     # 训练主循环
     for epoch in range(1, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, device)
         val_loss = evaluate(model, val_loader, criterion, device)
-        print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        example = show_sample_predictions(model, None, char2idx, max_gen_len=150, device=device)
+        show_log(train_loss, val_loss, epoch, example)
         if epoch % 5 == 0:
-            show_sample_predictions(model, start_text="湖光秋月两相和", idx2char=idx2char, char2idx=char2idx, device=device)
-
-    # 💾 模型保存
-    torch.save(model.state_dict(), "tcn_poetry.pth")
-    print("模型已保存为 tcn_poetry.pth")
+            save_checkpoint(model, optimizer, epoch, path="checkpoint/tcn_poetry.pth")
 
 
 if __name__ == "__main__":

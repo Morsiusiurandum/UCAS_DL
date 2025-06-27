@@ -64,9 +64,9 @@ def get_dataloaders(datasets_name, batch_size=64):
 def save_checkpoint(model, optimizer, epoch, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
-        'model_state_dict': model.state_dict(),
+        'model_state_dict'    : model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': epoch
+        'epoch'               : epoch
     }, path)
     print(f"Checkpoint saved to: {path}")
 
@@ -82,6 +82,10 @@ def load_checkpoint(model, optimizer, path):
     else:
         print(f"No checkpoint found at: {path}, starting from scratch.")
         return 1
+
+
+def show_log(train_loss, val_loss, epoch, example):
+    print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Example: {example}")
 
 
 class TangPoetryDataset(Dataset):

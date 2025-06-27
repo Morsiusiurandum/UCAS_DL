@@ -4,11 +4,11 @@ os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 
-# os.environ['MASTER_ADDR'] = '127.0.0.1'
-# os.environ['MASTER_PORT'] = '29500'
-# os.environ["LOCAL_RANK"] = "0"
-# os.environ["RANK"] = "0"
-# os.environ["WORLD_SIZE"] = "1"
+os.environ['MASTER_ADDR'] = '127.0.0.1'
+os.environ['MASTER_PORT'] = '29500'
+os.environ["LOCAL_RANK"] = "0"
+os.environ["RANK"] = "0"
+os.environ["WORLD_SIZE"] = "1"
 
 import torch.distributed as dist
 import torch.nn as nn
@@ -18,7 +18,7 @@ import torch
 from model import BERT2BERTTranslationModel
 
 
-def trainer(model, data_loader, optimizer, loss_function, teacher_forcing_ratio, device):
+def trainer(model, data_loader, optimizer, loss_function, device):
     model.train()
     total_loss = 0
 
@@ -51,11 +51,10 @@ def trainer(model, data_loader, optimizer, loss_function, teacher_forcing_ratio,
         #         decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
 
         # 构造 causal mask：防止 decoder 看到未来
-        causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=device)).bool()  # [tgt_len, tgt_len]
-        causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=device), diagonal=1).bool()  # [tgt_len, tgt_len]
+        causal_mask = ~causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
         padding_mask = target_mask.unsqueeze(1).expand(-1, tgt_len, -1)
         decoder_attention_mask = (causal_mask & padding_mask).int()  # 1表示可见位置
-
         # segment_type = torch.zeros_like(input_ids).to(device)
         output_logits = model(input_ids, segment_ids, input_mask, target_ids, decoder_attention_mask)
 
@@ -91,18 +90,22 @@ def evaluate(model, data_loader, loss_function, device):
     return total_loss / len(data_loader)
 
 
-def sample(model, src_word2idx, tgt_idx2word, device) -> str:
+def sample(model, src_word2idx, tgt_word2idx, tgt_idx2word, device) -> str:
     ###
 
     ###
     # 推理
     model.eval()
     # 准备测试输入
-    test_sentence = "七 天 时间 里 , 他们 为 赶 时间 , 白天 啃 干馕喝 白开水 , 晚上 居住 在 牧民 的 毡房 里 ."
+    test_sentence = "要 把 防洪 与 节水 , 保护 生态 , 防治 污染 结合 起来 ."
     test_tokens = test_sentence.split()
 
     if len(test_tokens) == 1:  # 可能是中文未分词，按字分
         test_tokens = list(test_sentence)
+
+    target_sentence = "in"
+    target_tokens = target_sentence.split()
+    target_index = [5]  # + [tgt_word2idx.get(word, tgt_word2idx.get('<UNK>', 0)) for word in target_tokens]
 
     # 将测试句子转换为索引
     test_index = [src_word2idx.get(word, src_word2idx.get('<UNK>', 0)) for word in test_tokens]
@@ -110,16 +113,24 @@ def sample(model, src_word2idx, tgt_idx2word, device) -> str:
 
     with ((torch.no_grad())):
         # 简单贪心解码
-        max_len = 30
-        tgt_input = torch.tensor([5], dtype=torch.long).unsqueeze(0).to(device)
+        max_len = 90
+        tgt_input = torch.tensor(target_index, dtype=torch.long).unsqueeze(0).to(device)
 
         for _ in range(max_len):
-
             input_token_ids = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
             segment_token_type_ids = torch.zeros(len(input_tensor), dtype=torch.long).to(device)
+            # 构造decoder_attention_mask
 
+            # 这里假设 tgt_input 的长度不超过 max_len
+            mask_len = len(target_index)
+            causal_mask = torch.triu(torch.ones((mask_len, mask_len), device=device), diagonal=1).bool()  # [tgt_len, tgt_len]
+            causal_mask = ~causal_mask.unsqueeze(0).expand(1, -1, -1)
+
+            attention_mask = causal_mask.int()  # 1表示可见位置
             #  得到模型输出
-            output_logits = model(input_token_ids, segment_token_type_ids, None, tgt_input, None)
+            output_logits = model(input_token_ids, segment_token_type_ids, None, tgt_input, attention_mask)
+            # max_indices = output_logits.argmax(dim=-1)  # shape: [1, 20]
+            # break
             next_token_logits = output_logits[0, -1]
             next_token_id = next_token_logits.argmax().item()
             tgt_input = torch.cat([tgt_input, torch.tensor([[next_token_id]], device=device)], dim=1)
@@ -162,11 +173,9 @@ def main():
     hidden_dimension = 2048
     dropout_rate = 0.2
     pad_token_id = 0  # 需要根据你的词表设置
-    teacher_forcing_ratio = 0.8
 
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    print(f"Device set to {device}, rank {rank}, world size {world_size}")
 
     from data_loader import get_dataloader
 
@@ -179,7 +188,7 @@ def main():
             rank=rank,
             world_size=world_size
     )
-    print("Data loader created.")
+
     # 模型
     model = BERT2BERTTranslationModel(
             len(src_word2idx),
@@ -196,14 +205,20 @@ def main():
     loss_function = nn.CrossEntropyLoss(ignore_index=pad_token_id)
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
-    total_epochs = 3
+    # 加载预训练模型
+    # model.module.load_state_dict(torch.load("bert2bert_epoch100.pth", map_location=device))
+    if rank == 0:
+        print(f"Device set to {device}, rank {rank}, world size {world_size}")
+        example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
+        print(f"Example output before training: {example}")
+
+    total_epochs = 30
     print(f"Starting training for {total_epochs} epochs...")
     for epoch in range(total_epochs):
         train_loader.sampler.set_epoch(epoch)
-        train_loss = trainer(model, train_loader, optimizer, loss_function, teacher_forcing_ratio, device)
-
+        train_loss = trainer(model, train_loader, optimizer, loss_function, device)
         if rank == 0:  # 只在主进程保存
-            example = sample(model.module, src_word2idx, tgt_idx2word, device)
+            example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
             print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Example: {example}")
             if (epoch + 1) % 10 == 0:
                 torch.save(model.module.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
