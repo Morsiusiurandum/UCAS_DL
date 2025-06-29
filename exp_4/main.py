@@ -1,17 +1,25 @@
+import sys
+
+sys.path.append("..")
+sys.path.append("../shared")
+
 import os
 
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 
-
-
+from shared import save_checkpoint, load_checkpoint
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 from model import BERT2BERTTranslationModel
+import nltk
+from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.meteor_score import meteor_score
+from nltk.translate.bleu_score import SmoothingFunction
 
 
 def trainer(model, data_loader, optimizer, loss_function, device):
@@ -31,30 +39,12 @@ def trainer(model, data_loader, optimizer, loss_function, device):
         batch_size, tgt_len = target_ids.size()
         optimizer.zero_grad()
 
-        # 使用 Teacher Forcing
-        # use_teacher = random.random() < teacher_forcing_ratio
-        # 
-        # if use_teacher:
-        #     # 直接使用 ground-truth 作为 decoder 输入
-        #     decoder_input_ids = target_ids
-        # else:
-        #     # 用 greedy decoding 模拟 decoder 自生成行为
-        #     decoder_input_ids = torch.full((batch_size, 1), fill_value=5, dtype=torch.long).to(device)  # 5 = <BOS>
-        #     for _ in range(tgt_len - 1):
-        #         segment_type = torch.zeros_like(input_ids).to(device)  # 假设全是句子 A
-        #         decoder_outputs = model(input_ids, segment_ids, input_mask, decoder_input_ids, None)
-        #         next_token = decoder_outputs[:, -1, :].argmax(dim=-1, keepdim=True)
-        #         decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
-
-        # 构造 causal mask：防止 decoder 看到未来
+        # constructing a causal mask: prevents the decoder from seeing the future.
         causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=device), diagonal=1).bool()  # [tgt_len, tgt_len]
         causal_mask = ~causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
         padding_mask = target_mask.unsqueeze(1).expand(-1, tgt_len, -1)
-        decoder_attention_mask = (causal_mask & padding_mask).int()  # 1表示可见位置
-        # segment_type = torch.zeros_like(input_ids).to(device)
+        decoder_attention_mask = (causal_mask & padding_mask).int()  # 1 indicates the visible location
         output_logits = model(input_ids, segment_ids, input_mask, target_ids, decoder_attention_mask)
-
-        # output_logits = model(input_ids, segment_ids, input_mask, target_ids, target_mask)
 
         loss = loss_function(output_logits.view(-1, output_logits.size(-1)), target_labels.view(-1))
         loss.backward()
@@ -65,85 +55,110 @@ def trainer(model, data_loader, optimizer, loss_function, device):
     return total_loss / len(data_loader)
 
 
-def evaluate(model, data_loader, loss_function, device):
+def evaluate(model, test_file_path, src_word2idx, tgt_idx2word, device):
+    def load_test_pairs(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().strip().split('\n')
+        sources, targets = [], []
+        for i in range(0, len(lines), 3):
+            src = lines[i].strip()
+            ref = lines[i + 2].strip()
+            if src and ref:
+                sources.append(src)
+                targets.append(ref)
+        return sources, targets
+
+    def translate_all(sentences):
+        return [generation(model, src_word2idx, tgt_idx2word, sentence, max_len=500, device=device) for sentence in sentences]
+
+    def compute_bleu(references, predictions):
+        smoothing_function = SmoothingFunction().method1
+        total_bleu = 0
+        count = 0
+    
+        for ref, pred in zip(references, predictions):
+            ref_tokens = ref.strip().split()
+            pred_tokens = pred.strip().split()
+            bleu_score = sentence_bleu(
+                    [ref_tokens],
+                    pred_tokens,
+                    weights=(0.25, 0.25, 0.25, 0.25),
+                    smoothing_function=smoothing_function
+            )
+            total_bleu += bleu_score
+            count += 1
+    
+        return total_bleu / count if count > 0 else 0.0
+    
+    sources, references = load_test_pairs(test_file_path)
+    predictions = translate_all(sources)
+    bleu = compute_bleu(references, predictions)
+    print(f"Test BLEU: {bleu * 100:.2f}")
+    return bleu
+
+
+def generation(model, src_word2idx, tgt_idx2word, test_sentence: str, max_len: int, device):
     model.eval()
-    total_loss = 0
 
-    with torch.no_grad():
-        for batch in data_loader:
-            input_ids = batch['input_ids'].to(device)
-            segment_ids = batch['segment_ids'].to(device)
-            input_mask = batch['attention_mask'].to(device)
+    test_tokens = test_sentence.split()
+    # May segment, by character
+    if len(test_tokens) == 1:
+        test_tokens = list(test_sentence)
 
-            target_ids = batch['decoder_input_ids'].to(device)
-            target_mask = batch['decoder_attention_mask'].to(device)
-            target_labels = batch['decoder_labels'].to(device)
+    test_token_ids = [src_word2idx.get(word, src_word2idx.get('<UNK>')) for word in test_tokens]
+    # To Tensor [1, seq_len]
+    test_token_ids = torch.tensor(test_token_ids, dtype=torch.long).unsqueeze(0).to(device)
 
-            output_logits = model(input_ids, segment_ids, input_mask, target_ids, target_mask)
-            loss = loss_function(output_logits.view(-1, output_logits.size(-1)), target_labels.view(-1))
-            total_loss += loss.item()
+    # The first token in the target sequence, <BOS>
+    output_token_ids = torch.tensor([5], dtype=torch.long).unsqueeze(0).to(device)
+    with ((torch.no_grad())):
 
-    return total_loss / len(data_loader)
+        for _ in range(max_len):
+
+            segment_type = torch.zeros(len(test_token_ids), dtype=torch.long).to(device)
+            # Construct causal mask for decoder
+
+            mask_len = len(output_token_ids)
+            causal_mask = torch.triu(torch.ones((mask_len, mask_len), device=device), diagonal=1).bool()  # [tgt_len, tgt_len]
+            causal_mask = ~causal_mask.unsqueeze(0).expand(1, -1, -1)
+            causal_mask = causal_mask.int()
+
+            output_logits = model(test_token_ids, segment_type, None, output_token_ids, causal_mask)
+            next_token_logits = output_logits[0, -1]
+            next_token_id = next_token_logits.argmax().item()
+
+            # Append the next token to the output sequence
+            output_token_ids = torch.cat([output_token_ids, torch.tensor([[next_token_id]], device=device)], dim=1)
+
+            # Stop the build if <EOS> token is generated
+            if next_token_id == 6:  # <EOS>
+                break
+        output_token_ids = output_token_ids[0].tolist()
+        # Remove <BOS> and <EOS> tokens
+        output_token_ids = output_token_ids[1:]  # remove <BOS>
+        output_token_ids = output_token_ids[:-1]  # remove <EOS>
+        # Convert the output index to words and output
+        output_tokens = [tgt_idx2word.get(token_id, src_word2idx.get('<UNK>')) for token_id in output_token_ids]
+        output_sentence = ' '.join(output_tokens)
+        return output_sentence
 
 
 def sample(model, src_word2idx, tgt_word2idx, tgt_idx2word, device) -> str:
-    ###
-
-    ###
-    # 推理
     model.eval()
-    # 准备测试输入
-    test_sentence = "要 把 防洪 与 节水 , 保护 生态 , 防治 污染 结合 起来 ."
-    test_tokens = test_sentence.split()
 
-    if len(test_tokens) == 1:  # 可能是中文未分词，按字分
-        test_tokens = list(test_sentence)
+    # 输入
+    sentence = "在此 背景 下 , 中国 要 融入 世界 经济 , 有必要 加快 发展 高技术 产业 , 增强 综合 国力 , 改善 这 一 产业 的 国际 分工 地位 ."
+    # 候选文本和参考文本
+    candidate = "against this background , if china is to be incorporated into the world economy , it is essential that we accelerate the development of high - tech industry , enhance the overall national strength , and improve this industry 's standing in terms of the international division of labor ."
+    reference = generation(model, src_word2idx, tgt_idx2word, sentence, max_len=500, device=device)
 
-    target_sentence = "in"
-    target_tokens = target_sentence.split()
-    target_index = [5]  # + [tgt_word2idx.get(word, tgt_word2idx.get('<UNK>', 0)) for word in target_tokens]
-
-    # 将测试句子转换为索引
-    test_index = [src_word2idx.get(word, src_word2idx.get('<UNK>', 0)) for word in test_tokens]
-    input_tensor = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
-
-    with ((torch.no_grad())):
-        # 简单贪心解码
-        max_len = 90
-        tgt_input = torch.tensor(target_index, dtype=torch.long).unsqueeze(0).to(device)
-
-        for _ in range(max_len):
-            input_token_ids = torch.tensor(test_index, dtype=torch.long).unsqueeze(0).to(device)  # [1, seq_len]
-            segment_token_type_ids = torch.zeros(len(input_tensor), dtype=torch.long).to(device)
-            # 构造decoder_attention_mask
-
-            # 这里假设 tgt_input 的长度不超过 max_len
-            mask_len = len(target_index)
-            causal_mask = torch.triu(torch.ones((mask_len, mask_len), device=device), diagonal=1).bool()  # [tgt_len, tgt_len]
-            causal_mask = ~causal_mask.unsqueeze(0).expand(1, -1, -1)
-
-            attention_mask = causal_mask.int()  # 1表示可见位置
-            #  得到模型输出
-            output_logits = model(input_token_ids, segment_token_type_ids, None, tgt_input, attention_mask)
-            # max_indices = output_logits.argmax(dim=-1)  # shape: [1, 20]
-            # break
-            next_token_logits = output_logits[0, -1]
-            next_token_id = next_token_logits.argmax().item()
-            tgt_input = torch.cat([tgt_input, torch.tensor([[next_token_id]], device=device)], dim=1)
-
-            # 如果遇到 <EOS>，则停止生成
-            if next_token_id == 6:
-                break
-        output_ids = tgt_input[0].tolist()
-
-        # 将输出索引转换为单词
-        output_words = [tgt_idx2word.get(idx, '<UNK>') for idx in output_ids]
-        return ' '.join(output_words)
-        # print(f"Test sentence: {test_sentence}")
-        # print(f"Tokenized: {test_tokens}")
-        # print(f"Token IDs: {test_index}")
-        # print(f"Model output IDs: {output_ids}")
-        # print(f"Model output words: {' '.join(output_words)}")
+    # BLEU-4
+    candidate_tokens = candidate.split()
+    reference_tokens = reference.split()
+    smoothing_function = SmoothingFunction().method1  # 平滑函数
+    bleu_4 = sentence_bleu([reference_tokens], candidate_tokens, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothing_function)
+    print("BLEU-4:", bleu_4)
+    return reference
 
 
 def setup(rank, world_size):
@@ -156,19 +171,20 @@ def cleanup():
 
 
 def main():
-    # 获取 torchrun 设置的 rank/世界大小信息
+    # Get the rank/world size information set by torchrun
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+
     setup(rank, world_size)
-    # 模型超参数
+
     model_dimension = 512
     maximum_sequence_length = 512
     number_of_layers = 6
     number_of_attention_heads = 8
     hidden_dimension = 2048
     dropout_rate = 0.2
-    pad_token_id = 0  # 需要根据你的词表设置
+    pad_token_id = 0
 
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
@@ -202,57 +218,30 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 
     # 加载预训练模型
-    # model.module.load_state_dict(torch.load("bert2bert_epoch100.pth", map_location=device))
+
+    start_epoch = load_checkpoint(model, optimizer, path="checkpoint/bert2bert_zh2en.pth")
 
     total_epochs = 500
     if rank == 0:
         print(f"Device set to {device}, rank {rank}, world size {world_size}")
         example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
         print(f"Example output before training: {example}")
-        print(f"Starting training for {total_epochs} epochs...")
+        print(f"Starting training for {total_epochs} epochs,currently on epoch {start_epoch}...")
 
-    
-    for epoch in range(total_epochs):
+    for epoch in range(start_epoch, total_epochs + 1):
         train_loader.sampler.set_epoch(epoch)
         train_loss = trainer(model, train_loader, optimizer, loss_function, device)
-        if rank == 0:  # 只在主进程保存
+        # Save only in the main process
+        if rank == 0:
             example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
             print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Example: {example}")
             if (epoch + 1) % 50 == 0:
-                torch.save(model.module.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
+                save_checkpoint(model, optimizer, epoch, "checkpoint/bert2bert_zh2en.pth")
                 print(f"Saving model at epoch {epoch + 1}...")
-
+    print("Training complete. Evaluating model...")
+    evaluate(model, "dataset/Reference-for-evaluation/Niu.test.reference", src_word2idx, tgt_idx2word, device)
     cleanup()
-    # model.load_state_dict(torch.load("bert2bert_epoch10.pth"))
 
 
 if __name__ == "__main__":
-    # print(torch.__version__)
-    # print(torch.version.cuda)
-    # print(torch.backends.cudnn.version())
-    # print(torch.distributed.is_nccl_available())
-
     main()
-
-    # from data_loader import get_dataloader
-    #
-    # dataloader, src_word2idx, src_idx2word, tgt_word2idx, tgt_idx2word = get_dataloader(
-    #         src_path="dataset/TM-training-set/chinese.txt",
-    #         tgt_path="dataset/TM-training-set/english.txt",
-    #         src_vocab_path="dataset/vocab.zh",
-    #         tgt_vocab_path="dataset/vocab.en"
-    # )
-    #
-    # print(f"DataLoader created with {len(dataloader.dataset)} samples.")
-    # out = dataloader.dataset[0]
-    # print(f"First sample: {dataloader.dataset[0]}")
-    # print(f"First sample: {dataloader.dataset[0][0].tolist()} -> \n {dataloader.dataset[0][1].tolist()}")
-    # # 打印转码后的内容
-    # src_words = [src_idx2word[idx] for idx in dataloader.dataset[0][0].tolist()]
-    # tgt_words = [tgt_idx2word[idx] for idx in dataloader.dataset[0][1].tolist()]
-    # print(f"Decoded: {' '.join(src_words)} -> {' '.join(tgt_words)}")
-    # # 打印每个token对应的单字
-    # src_chars = [(src_idx2word[idx], idx) for idx in dataloader.dataset[0][0].tolist()]
-    # print(f"Src chars: {src_chars}")
-    # tgt_chars = [(tgt_idx2word[idx], idx) for idx in dataloader.dataset[0][1].tolist()]
-    # print(f"Tgt chars: {tgt_chars}")
