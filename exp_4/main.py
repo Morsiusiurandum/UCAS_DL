@@ -4,11 +4,7 @@ os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 
-os.environ['MASTER_ADDR'] = '127.0.0.1'
-os.environ['MASTER_PORT'] = '29500'
-os.environ["LOCAL_RANK"] = "0"
-os.environ["RANK"] = "0"
-os.environ["WORLD_SIZE"] = "1"
+
 
 import torch.distributed as dist
 import torch.nn as nn
@@ -203,24 +199,26 @@ def main():
 
     model = DDP(model, device_ids=[rank])
     loss_function = nn.CrossEntropyLoss(ignore_index=pad_token_id)
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 
     # 加载预训练模型
     # model.module.load_state_dict(torch.load("bert2bert_epoch100.pth", map_location=device))
+
+    total_epochs = 500
     if rank == 0:
         print(f"Device set to {device}, rank {rank}, world size {world_size}")
         example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
         print(f"Example output before training: {example}")
+        print(f"Starting training for {total_epochs} epochs...")
 
-    total_epochs = 30
-    print(f"Starting training for {total_epochs} epochs...")
+    
     for epoch in range(total_epochs):
         train_loader.sampler.set_epoch(epoch)
         train_loss = trainer(model, train_loader, optimizer, loss_function, device)
         if rank == 0:  # 只在主进程保存
             example = sample(model.module, src_word2idx, tgt_word2idx, tgt_idx2word, device)
             print(f"[Epoch {epoch + 1}] Train Loss: {train_loss:.4f} | Example: {example}")
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % 50 == 0:
                 torch.save(model.module.state_dict(), f"bert2bert_epoch{epoch + 1}.pth")
                 print(f"Saving model at epoch {epoch + 1}...")
 

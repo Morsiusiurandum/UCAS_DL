@@ -79,7 +79,7 @@ def get_dataloader(
         tgt_path,
         src_vocab_path,
         tgt_vocab_path,
-        batch_size=32,
+        batch_size=128,
         shuffle=True,
         distributed=False,
         rank=0,
