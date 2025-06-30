@@ -82,7 +82,7 @@ def evaluate(model, test_file_path, src_word2idx, tgt_idx2word, device):
             bleu_score = sentence_bleu(
                     [ref_tokens],
                     pred_tokens,
-                    weights=(0.25, 0.25, 0.25, 0.25),
+                    weights=(0, 0, 0, 1), # Only use BLEU-4
                     smoothing_function=smoothing_function
             )
             total_bleu += bleu_score

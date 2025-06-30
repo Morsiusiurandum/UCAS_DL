@@ -46,7 +46,7 @@ def evaluate(model, dataloader, criterion, device):
     return total_loss / len(dataloader)
 
 
-def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=150, device=torch.device("cpu")):
+def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=125, device=torch.device("cpu")):
     model.eval()
     generated = ['<START>'] + list(start_text)
     char_ids = [char2idx.get(c, char2idx['<unk>']) for c in generated]
@@ -60,7 +60,7 @@ def show_sample_predictions(model, start_text, idx2char, char2idx, max_gen_len=1
             next_id = torch.multinomial(torch.softmax(last_logits, dim=-1), 1).item()
             next_char = idx2char.get(next_id, '<unk>')
             generated.append(next_char)
-            if next_char == '<EOP>':
+            if next_char == 8290:
                 break
             input_seq = torch.cat([input_seq, torch.tensor([[next_id]], device=device)], dim=1)
 
@@ -100,12 +100,15 @@ def main():
 
     # 模型加载
 
-    load_checkpoint(model, optimizer, path="checkpoint/tcn_poetry.pth")
-    example = show_sample_predictions(model, "哈基米", idx2char, char2idx, max_gen_len=150, device=device)
-    print(example)
-    return
+    start_epoch = load_checkpoint(model, optimizer, path="checkpoint/tcn_poetry.pth")
+    example_1 = show_sample_predictions(model, "海上生明月", idx2char, char2idx, device=device)
+    example_2 = show_sample_predictions(model, "城阙辅三秦", idx2char, char2idx, device=device)
+    example_3 = show_sample_predictions(model, "前不见古人", idx2char, char2idx, device=device)
+    example_4 = show_sample_predictions(model, "飞桥隔野烟", idx2char, char2idx, device=device)
+    print(f"Examples:\n1: {example_1}\n2: {example_2}\n3: {example_3}\n4: {example_4}")
+
     # 训练主循环
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, device)
         val_loss = evaluate(model, val_loader, criterion, device)
         example = show_sample_predictions(model, None, char2idx, max_gen_len=150, device=device)

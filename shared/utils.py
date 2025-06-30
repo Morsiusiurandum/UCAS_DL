@@ -93,7 +93,7 @@ class TangPoetryDataset(Dataset):
         data = np.load(npz_path, allow_pickle=True)
         self.data = data['data']  # shape: (57580, 125)
         self.ix2word = data['ix2word'].item()
-        self.word2ix = data['word2ix'].item()  # 字典：word -> index
+        self.word2ix = data['word2ix'].item()  
 
     def __len__(self):
         return len(self.data)
